@@ -25,9 +25,9 @@ def main():
     config.readfp(open(sys.argv[1]))
     global logfile
     logfile = config.get("global", "logfile")
-    FORMAT = "%(asctime)-15s: %(message)s"
-    logging.basicConfig(level=logging.INFO, filename=logfile, filemode='w',
-                        format=FORMAT)
+    FORMAT = "[%(levelname)s %(asctime)-15s.%(msecs)03d %(module)s %(lineno)d] %(message)s"
+    logging.basicConfig(level=logging.DEBUG, filename=logfile, filemode='w',
+                        format=FORMAT, datefmt='%Y-%m-%d %H:%M:%S')
 
     # Set time on WDLXTV systems
     rdate = "/usr/sbin/rdate"
@@ -35,8 +35,9 @@ def main():
         cmd = [rdate, "ntp.internode.on.net"]
         subprocess.Popen(cmd).wait()
 
-    logging.info("Main process PID: %d, use this for sending SIGHUP "
-                 "for re-reading the schedule-file", os.getpid())
+    logging.info("Main process PID: %d", os.getpid())
+    logging.info("re-read schedule-file: kill -HUP %d", os.getpid())
+    logging.info("stop scheduler: kill -9 %d", os.getpid())
 
     global tuners
     tuners = TUNERS(config.get("global", "tuners"))
@@ -97,7 +98,7 @@ def schedule_jobs(sched, schedule_file, channelmap, media_dir):
             repeat = True
         (channel, subchannel) = channelmap[vchannel]
         period = int(period)
-        job = JOB(media_dir, prog_name, start, period, channel, subchannel)
+        job = JOB(media_dir, prog_name, start, period, channel, subchannel, vchannel)
 
         if repeat:
             sched.add_cron_job(job.record, hour=start.hour,
@@ -140,7 +141,7 @@ class TUNERS:
         self.lock.release()
 
 class JOB:
-    def __init__(self, basedir, prog_name, start, period, channel, subchannel):
+    def __init__(self, basedir, prog_name, start, period, channel, subchannel, vchannel):
         self.basedir = os.path.normpath(basedir)
         self.prog_name = prog_name
         self.start = start
@@ -148,6 +149,7 @@ class JOB:
         # TODO: We should correct stripping at the source.
         self.channel = channel.strip()
         self.subchannel = subchannel.strip()
+        self.vchannel = vchannel
 
     def record(self):
         tuner = tuners.get_tuner()
@@ -168,15 +170,23 @@ class JOB:
         import time
         import tempfile
 
-        logging.info("Started recording %s on device: (%s, %s, %s:%s)" % (
-                     self.prog_name, device_id, tuner_num,
+        logging.info("Started recording '%s' for %s min on %s, device: (%s, %s, %s:%s)" % (
+                     self.prog_name, self.period, self.vchannel,
+                     device_id, tuner_num,
                      self.channel, self.subchannel))
         now = datetime.datetime.now()
-        date = now.strftime("%Y-%m-%d")
-        dirname = os.path.join(self.basedir, self.prog_name)
-        if not os.path.exists(dirname):
-            os.makedirs(dirname)
-        filename = os.path.join(dirname, "%s.ts" % date)
+        if False:   # original code
+            date = now.strftime("%Y-%m-%d")
+            dirname = os.path.join(self.basedir, self.prog_name)
+            if not os.path.exists(dirname):
+                os.makedirs(dirname)
+            filename = os.path.join(dirname, "%s.ts" % date)
+        else:       # my way
+            date = now.strftime("%Y-%m-%d %H-%M")
+            dirname = self.basedir
+            filename = os.path.join(dirname, "%s %s %s.ts" % (
+                self.prog_name, date, self.vchannel.replace(".", "-")))
+            logging.info("Recording file: '%s'" % filename)
         cmd = [hdhomerun_config, device_id, "set"]
         cmd.extend(["/tuner%s/channel" % tuner_num, self.channel])
         subprocess.Popen(cmd).wait()
@@ -189,6 +199,7 @@ class JOB:
         cmd.extend(["/tuner%s" % tuner_num, filename])
         f = tempfile.TemporaryFile("w+")
         p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
+        logging.info("Recording PID: %d" % p.pid)
 
         # Record from now to the end of the program.
         now = datetime.datetime.now()
@@ -203,9 +214,9 @@ class JOB:
         f.seek(0)
         data = f.read()
         f.close()
-        logging.info("Ended recording %s on device: (%s, %s, %s:%s), "
+        logging.info("Ended recording '%s' on device: (%s, %s, %s:%s) "
                      "status: %s" % (
-                     self.prog_name, device_id, tuner_num,
+                     filename, device_id, tuner_num,
                      self.channel, self.subchannel, data))
 
 if __name__ == '__main__':
